@@ -5,9 +5,10 @@ Solo librerie standard di Python."""
 import html
 import json
 import os
+import re
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
@@ -31,6 +32,9 @@ FEED = {
     ],
 }
 NOTIZIE_PER_TESTATA = 10
+
+# Orari lezioni UniBo (2° anno, Economia dell'impresa, Rimini)
+ORARI_URL = "https://corsi.unibo.it/laurea/clei/orario-lezioni/@@orario_reale_json?anno=2&curricula=B69-000"
 # ---------------------------------------------------------------------------
 
 CODICI = {
@@ -91,6 +95,49 @@ def scheda_meteo(nome, lat, lon):
         return f'<section class="card"><h2>{html.escape(nome)}</h2><p>⚠️ Meteo non disponibile.</p></section>'
 
 
+MEDIA = "{http://search.yahoo.com/mrss/}"
+
+
+def immagine(it):
+    """Cerca l'indirizzo dell'immagine nella voce del feed (se c'è)."""
+    for e in it.iter():
+        u = e.get("url") or ""
+        if not u.startswith("http") or e.tag not in (MEDIA + "content", MEDIA + "thumbnail", "enclosure"):
+            continue
+        tipo = (e.get("type") or "") + (e.get("medium") or "")
+        if e.tag == MEDIA + "thumbnail" or "image" in tipo or u.lower().split("?")[0].endswith((".jpg", ".jpeg", ".png", ".webp")):
+            return u
+    m = re.search(r'<img[^>]+src=["\']([^"\']+)', it.findtext("description") or "")
+    return m.group(1) if m else ""
+
+
+def lezioni_domani(ora):
+    domani = (ora + timedelta(days=1)).date()
+    dopo = domani + timedelta(days=1)
+    try:
+        dati = json.loads(scarica(f"{ORARI_URL}&start={domani}&end={dopo}"))
+        if isinstance(dati, dict):
+            dati = dati.get("events") or dati.get("data") or []
+        eventi = sorted((e for e in dati if str(e.get("start", ""))[:10] == str(domani)),
+                        key=lambda e: str(e.get("start")))
+    except Exception as errore:
+        print(f"Orari non disponibili: {errore}")
+        return "<p>⚠️ Orari non disponibili.</p>"
+    if not eventi:
+        return f"<p>Nessuna lezione domani ({GIORNI[domani.weekday()]} {domani:%d/%m}).</p>"
+    righe = ""
+    for e in eventi:
+        aule = e.get("aule") or []
+        if isinstance(aule, list):
+            aula = ", ".join(str(a.get("des_risorsa", a)) if isinstance(a, dict) else str(a) for a in aule)
+        else:
+            aula = str(aule)
+        orario = f"{str(e.get('start'))[11:16]}–{str(e.get('end', ''))[11:16]}"
+        righe += (f"<li><div><b>{orario}</b> {html.escape(str(e.get('title', '?')))}"
+                  f"{' · ' + html.escape(aula) if aula else ''}</div></li>")
+    return f"<p class=\"sub\">{GIORNI[domani.weekday()]} {domani:%d/%m}</p><ul>{righe}</ul>"
+
+
 def notizie():
     tutte, avvisi = [], []
     for fonte, indirizzi in FEED.items():
@@ -108,7 +155,7 @@ def notizie():
                     except Exception:
                         data = datetime.min.replace(tzinfo=UTC)
                     if titolo and link:
-                        voci[link] = (data, fonte, titolo, link)
+                        voci[link] = (data, fonte, titolo, link, immagine(it))
             except Exception as errore:
                 print(f"Feed non disponibile ({fonte}) {url}: {errore}")
         if not voci:
@@ -117,9 +164,10 @@ def notizie():
         tutte += migliori
     tutte.sort(key=lambda v: v[0], reverse=True)
     elenco = "".join(
-        f'<li><span class="fonte">{html.escape(f)}</span> '
-        f'<a href="{html.escape(l)}" target="_blank" rel="noopener">{html.escape(t)}</a></li>'
-        for _, f, t, l in tutte
+        (f'<li><img src="{html.escape(im)}" alt="" loading="lazy" referrerpolicy="no-referrer">' if im else "<li>")
+        + f'<div><span class="fonte">{html.escape(f)}</span> '
+        f'<a href="{html.escape(l)}" target="_blank" rel="noopener">{html.escape(t)}</a></div></li>'
+        for _, f, t, l, im in tutte
     )
     note = "".join(f"<p>{a}</p>" for a in avvisi)
     return f"{note}<ul>{elenco}</ul>"
@@ -140,7 +188,8 @@ h1{margin:.2em 0}.sub{color:var(--sub)}
 .card h2{margin:0 0 4px}.card p{margin:3px 0}.big{font-size:2.4rem;font-weight:700}
 table{width:100%;border-collapse:collapse;margin-top:8px;font-size:.9rem}
 td{padding:4px 2px;border-top:1px solid #8884}
-ul{list-style:none;padding:0}li{background:var(--card);margin:8px 0;padding:10px 12px;border-radius:10px}
+ul{list-style:none;padding:0}li{background:var(--card);margin:8px 0;padding:10px 12px;border-radius:10px;display:flex;gap:12px;align-items:center}
+li img{width:104px;height:70px;object-fit:cover;border-radius:8px;flex:none}
 a{color:var(--ac);text-decoration:none}
 .fonte{display:inline-block;font-size:.72rem;font-weight:700;color:var(--sub);text-transform:uppercase;margin-right:6px}
 .link{font-size:.9rem}
@@ -153,6 +202,8 @@ a{color:var(--ac);text-decoration:none}
 <a href="https://www.google.com/search?q=meteo+Viserbella" target="_blank" rel="noopener">Google Viserbella</a> ·
 <a href="https://www.ilmeteo.it/meteo/Rimini" target="_blank" rel="noopener">ilmeteo.it Rimini</a> ·
 <a href="https://www.google.com/search?q=ilmeteo.it+meteo+Viserbella" target="_blank" rel="noopener">ilmeteo.it Viserbella</a></p>
+<h2>Lezioni di domani</h2>
+__LEZIONI__
 <h2>Notizie</h2>
 __NOTIZIE__
 <p class="sub">Dati meteo: Open-Meteo.com. Notizie: titoli e link dei feed RSS delle testate.</p>
@@ -163,7 +214,7 @@ def main():
     ora = datetime.now(ZoneInfo("Europe/Rome"))
     data = f"{GIORNI[ora.weekday()]} {ora:%d/%m/%Y %H:%M}"
     meteo = "".join(scheda_meteo(n, la, lo) for n, (la, lo) in LUOGHI.items())
-    pagina = MODELLO.replace("__DATA__", data).replace("__METEO__", meteo).replace("__NOTIZIE__", notizie())
+    pagina = MODELLO.replace("__DATA__", data).replace("__METEO__", meteo).replace("__LEZIONI__", lezioni_domani(ora)).replace("__NOTIZIE__", notizie())
     os.makedirs("sito", exist_ok=True)
     with open("sito/index.html", "w", encoding="utf-8") as f:
         f.write(pagina)
