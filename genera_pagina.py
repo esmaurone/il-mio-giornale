@@ -7,6 +7,7 @@ import json
 import os
 import re
 import urllib.request
+from urllib.parse import quote, quote_plus
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -18,20 +19,33 @@ LUOGHI = {
     "Viserbella": (44.0930, 12.5750),  # coordinate approssimate
 }
 
-# Per ogni testata puoi mettere più indirizzi RSS: lo script usa quelli che funzionano.
-# DA VERIFICARE: se una testata non compare, cerca la pagina "RSS" sul suo sito
-# e sostituisci qui gli indirizzi.
-FEED = {
-    "Il Sole 24 Ore": [
-        "https://www.ilsole24ore.com/rss/italia.xml",
-        "https://www.ilsole24ore.com/rss/economia.xml",
-    ],
-    "Sky TG24": [
-        "https://tg24.sky.it/rss/tg24.xml",
-        "https://tg24.sky.it/rss/tg24_ultimora.xml",
-    ],
+# Titoli seguiti: (nome, ricerca per le notizie, simbolo Yahoo Finance, id CoinGecko come piano B)
+# Per aggiungerne o toglierne basta copiare o cancellare una riga.
+TITOLI = [
+    ("AMD", "AMD azioni", "AMD", ""),
+    ("Tesla", "Tesla TSLA azioni", "TSLA", ""),
+    ("ASML", "ASML azioni", "ASML", ""),
+    ("Ferrari", "Ferrari titolo borsa", "RACE.MI", ""),
+    ("Nvidia", "Nvidia azioni", "NVDA", ""),
+    ("Amazon", "Amazon AMZN azioni", "AMZN", ""),
+    ("Nasdaq", "Nasdaq Inc NDAQ azioni", "NDAQ", ""),  # Nasdaq Inc. (per l'indice usa "^IXIC")
+    ("IBM", "IBM azioni", "IBM", ""),
+    ("D-Wave Quantum", "D-Wave Quantum", "QBTS", ""),
+    ("IonQ", "IonQ", "IONQ", ""),
+    ("Intesa Sanpaolo", "Intesa Sanpaolo", "ISP.MI", ""),
+    ("BPER Banca", "BPER Banca", "BPE.MI", ""),
+    ("Bitcoin", "Bitcoin", "BTC-USD", "bitcoin"),
+    ("USDT", "USDT Tether", "USDT-USD", "tether"),
+]
+NOTIZIE_PER_TITOLO = 2       # quante notizie mostrare per ogni titolo
+NOTIZIE_ULTIMI_GIORNI = 2    # solo notizie degli ultimi N giorni
+
+# Schede ufficiali di Borsa Italiana (per controllare i prezzi dei titoli italiani)
+BORSA_ITALIANA = {
+    "RACE.MI": "https://www.borsaitaliana.it/borsa/azioni/scheda/NL0011585146.html",
+    "ISP.MI": "https://www.borsaitaliana.it/borsa/azioni/scheda/IT0000072618.html",
+    "BPE.MI": "https://www.borsaitaliana.it/borsa/azioni/scheda/IT0000066123.html",
 }
-NOTIZIE_PER_TESTATA = 10
 
 # "Accadde oggi": solo eventi degli ultimi N anni
 ACCADDE_ULTIMI_ANNI = 115
@@ -138,22 +152,6 @@ def scheda_meteo(nome, lat, lon, ora):
         return f'<section class="card"><h2>{html.escape(nome)}</h2><p>⚠️ Meteo non disponibile.</p></section>'
 
 
-MEDIA = "{http://search.yahoo.com/mrss/}"
-
-
-def immagine(it):
-    """Cerca l'indirizzo dell'immagine nella voce del feed (se c'è)."""
-    for e in it.iter():
-        u = e.get("url") or ""
-        if not u.startswith("http") or e.tag not in (MEDIA + "content", MEDIA + "thumbnail", "enclosure"):
-            continue
-        tipo = (e.get("type") or "") + (e.get("medium") or "")
-        if e.tag == MEDIA + "thumbnail" or "image" in tipo or u.lower().split("?")[0].endswith((".jpg", ".jpeg", ".png", ".webp")):
-            return u
-    m = re.search(r'<img[^>]+src=["\']([^"\']+)', it.findtext("description") or "")
-    return m.group(1) if m else ""
-
-
 def lezioni(ora):
     oggi = ora.date()
     domani = oggi + timedelta(days=1)
@@ -230,38 +228,106 @@ def accadde_oggi(ora):
 
 
 def notizie():
-    tutte, avvisi = [], []
-    for fonte, indirizzi in FEED.items():
-        voci = {}
-        for url in indirizzi:
-            try:
-                radice = ET.fromstring(scarica(url))
-                for it in radice.iter("item"):
-                    titolo = (it.findtext("title") or "").strip()
-                    link = (it.findtext("link") or "").strip()
-                    try:
-                        data = parsedate_to_datetime(it.findtext("pubDate"))
-                        if data.tzinfo is None:
-                            data = data.replace(tzinfo=UTC)
-                    except Exception:
-                        data = datetime.min.replace(tzinfo=UTC)
-                    if titolo and link:
-                        voci[link] = (data, fonte, titolo, link, immagine(it))
-            except Exception as errore:
-                print(f"Feed non disponibile ({fonte}) {url}: {errore}")
-        if not voci:
-            avvisi.append(f"⚠️ {fonte}: nessun feed funzionante, controlla gli indirizzi nello script.")
-        migliori = sorted(voci.values(), key=lambda v: v[0], reverse=True)[:NOTIZIE_PER_TESTATA]
-        tutte += migliori
-    tutte.sort(key=lambda v: v[0], reverse=True)
-    elenco = "".join(
-        (f'<li><img src="{html.escape(im)}" alt="" loading="lazy" referrerpolicy="no-referrer">' if im else "<li>")
-        + f'<div><span class="fonte">{html.escape(f)}</span> '
-        f'<a href="{html.escape(l)}" target="_blank" rel="noopener">{html.escape(t)}</a></div></li>'
-        for _, f, t, l, im in tutte
-    )
-    note = "".join(f"<p>{a}</p>" for a in avvisi)
-    return f"{note}<ul>{elenco}</ul>"
+    voci, senza = {}, []
+    for nome, ricerca, _, _ in TITOLI:
+        try:
+            q = quote_plus(f"{ricerca} when:{NOTIZIE_ULTIMI_GIORNI}d")
+            radice = ET.fromstring(scarica(f"https://news.google.com/rss/search?q={q}&hl=it&gl=IT&ceid=IT:it"))
+            trovate = []
+            for it in radice.iter("item"):
+                titolo = (it.findtext("title") or "").strip()
+                link = (it.findtext("link") or "").strip()
+                try:
+                    data = parsedate_to_datetime(it.findtext("pubDate"))
+                    if data.tzinfo is None:
+                        data = data.replace(tzinfo=UTC)
+                except Exception:
+                    data = datetime.min.replace(tzinfo=UTC)
+                if titolo and link:
+                    trovate.append((data, nome, titolo, link))
+            trovate.sort(key=lambda v: v[0], reverse=True)
+            if not trovate:
+                senza.append(nome)
+            for v in trovate[:NOTIZIE_PER_TITOLO]:
+                voci.setdefault(v[3], v)
+        except Exception as errore:
+            print(f"Notizie {nome} non disponibili: {errore}")
+            senza.append(nome)
+    elenco = ""
+    for _, nome, titolo, link in sorted(voci.values(), key=lambda v: v[0], reverse=True):
+        testo, _, giornale = titolo.rpartition(" - ")  # Google News scrive "Titolo - Testata"
+        if not testo:
+            testo, giornale = titolo, ""
+        elenco += (f'<li><div><span class="fonte">{html.escape(nome)}</span> '
+                   f'<a href="{html.escape(link)}" target="_blank" rel="noopener">{html.escape(testo)}</a> '
+                   f'<span class="giornale">{html.escape(giornale)}</span></div></li>')
+    nota = f'<p class="sub">Nessuna notizia recente per: {html.escape(", ".join(senza))}.</p>' if senza else ""
+    return f'<ul class="notizie">{elenco}</ul>{nota}'
+
+
+def num(x, dec=None):
+    if x is None:
+        return "–"
+    dec = (4 if abs(x) < 10 else 2) if dec is None else dec
+    return f"{x:,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def intervallo(a, b):
+    return "–" if a is None or b is None else f"{num(a)} – {num(b)}"
+
+
+def scarica_titolo(simbolo):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(simbolo, safe='')}?range=5d&interval=1d"
+    r = json.loads(scarica(url))["chart"]["result"][0]
+    meta = r["meta"]
+    chiusure = [c for c in r["indicators"]["quote"][0].get("close", []) if c is not None]
+    prezzo = meta["regularMarketPrice"]
+    prec = chiusure[-2] if len(chiusure) >= 2 else None
+    return {
+        "prezzo": prezzo, "var": (prezzo / prec - 1) * 100 if prec else None,
+        "valuta": meta.get("currency", ""), "ora": meta.get("regularMarketTime"),
+        "min_g": meta.get("regularMarketDayLow"), "max_g": meta.get("regularMarketDayHigh"),
+        "min_52": meta.get("fiftyTwoWeekLow"), "max_52": meta.get("fiftyTwoWeekHigh"),
+    }
+
+
+def borsa():
+    righe, cg = "", None
+    for nome, _, simbolo, id_cg in TITOLI:
+        try:
+            d = scarica_titolo(simbolo)
+        except Exception as errore:
+            print(f"Borsa {nome} ({simbolo}) non disponibile: {errore}")
+            d = None
+            if id_cg:  # piano B per le criptovalute
+                try:
+                    if cg is None:
+                        cg = json.loads(scarica("https://api.coingecko.com/api/v3/simple/price"
+                                                "?ids=bitcoin,tether&vs_currencies=usd&include_24hr_change=true"))
+                    d = {"prezzo": cg[id_cg]["usd"], "var": cg[id_cg].get("usd_24h_change"), "valuta": "USD",
+                         "min_g": None, "max_g": None, "min_52": None, "max_52": None}
+                except Exception as errore2:
+                    print(f"Piano B {nome} non disponibile: {errore2}")
+        if d is None:
+            righe += f'<tr><td><b>{html.escape(nome)}</b></td><td colspan="5">dato non disponibile</td></tr>'
+            continue
+        v = d["var"]
+        classe = "" if v is None else ("su" if v >= 0 else "giu")
+        var = "–" if v is None else f"{'+' if v >= 0 else ''}{num(v, 2)}%"
+        val = {"USD": "$", "EUR": "€"}.get(d["valuta"], d["valuta"])
+        link_bi = BORSA_ITALIANA.get(simbolo)
+        extra = f' · <a href="{link_bi}" target="_blank" rel="noopener">Borsa Italiana</a>' if link_bi else ""
+        try:
+            ultimo = datetime.fromtimestamp(d["ora"], ZoneInfo("Europe/Rome")).strftime("%d/%m %H:%M")
+        except Exception:
+            ultimo = "–"
+        righe += (f"<tr><td><b>{html.escape(nome)}</b><br><small>{html.escape(simbolo)}{extra}</small></td>"
+                  f"<td>{num(d['prezzo'])} {val}</td>"
+                  f'<td class="{classe}">{var}</td>'
+                  f"<td>{intervallo(d['min_g'], d['max_g'])}</td><td>{intervallo(d['min_52'], d['max_52'])}</td>"
+                  f"<td>{ultimo}</td></tr>")
+    return ('<div class="scorri"><table class="borsa"><tr><th>Titolo</th><th>Prezzo</th><th>Var. giorno</th>'
+            f'<th>Min–Max giorno</th><th>Min–Max 52 sett.</th><th>Ultimo dato</th></tr>{righe}</table></div>')
 
 
 MODELLO = """<!doctype html>
@@ -285,6 +351,10 @@ a{color:var(--ac);text-decoration:none}
 .fonte{display:inline-block;font-size:.95rem;font-weight:800;color:var(--ac);text-transform:uppercase;letter-spacing:.03em;margin-right:8px}
 li a{font-size:1.12rem;font-weight:600}
 li.urgente{border-left:5px solid #d33}
+.notizie li a{font-size:1.4rem;font-weight:700;line-height:1.25}.notizie .fonte{font-size:1.05rem}
+.giornale{color:var(--sub);font-size:.85rem}
+.su{color:#1a8f3c;font-weight:700}.giu{color:#d33;font-weight:700}
+th{text-align:left;font-size:.8rem;color:var(--sub)}.borsa td{white-space:nowrap;vertical-align:top}
 .fascia{display:flex;gap:6px;overflow-x:auto;padding-bottom:6px}
 .ora{flex:none;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:54px;padding:6px 4px;border-radius:10px;background:#8881}
 .ora small{color:var(--sub);font-size:.72rem}.scorri{overflow-x:auto}
@@ -305,9 +375,11 @@ __LEZIONI__
 __ESAMI__
 <h2>Accadde oggi</h2>
 __ACCADDE__
-<h2>Notizie</h2>
+<h2>Notizie di economia</h2>
 __NOTIZIE__
-<p class="sub">Dati meteo: Open-Meteo.com. Notizie: titoli e link dei feed RSS delle testate.</p>
+<h2>Dati di borsa</h2>
+__BORSA__
+<p class="sub">Meteo: Open-Meteo.com. Notizie: Google News (titoli e link). Borsa: Yahoo Finance (per i titoli italiani prezzi di Borsa Italiana, in genere con circa 15 minuti di ritardo); dati indicativi, non sono consigli di investimento. Per i dati ufficiali usa i link Borsa Italiana.</p>
 </main></body></html>"""
 
 
@@ -315,7 +387,7 @@ def main():
     ora = datetime.now(ZoneInfo("Europe/Rome"))
     data = f"{GIORNI[ora.weekday()]} {ora:%d/%m/%Y %H:%M}"
     meteo = "".join(scheda_meteo(n, la, lo, ora) for n, (la, lo) in LUOGHI.items())
-    pagina = MODELLO.replace("__DATA__", data).replace("__METEO__", meteo).replace("__LEZIONI__", lezioni(ora)).replace("__ESAMI__", esami(ora)).replace("__ACCADDE__", accadde_oggi(ora)).replace("__NOTIZIE__", notizie())
+    pagina = MODELLO.replace("__DATA__", data).replace("__METEO__", meteo).replace("__LEZIONI__", lezioni(ora)).replace("__ESAMI__", esami(ora)).replace("__ACCADDE__", accadde_oggi(ora)).replace("__NOTIZIE__", notizie()).replace("__BORSA__", borsa())
     os.makedirs("sito", exist_ok=True)
     with open("sito/index.html", "w", encoding="utf-8") as f:
         f.write(pagina)
