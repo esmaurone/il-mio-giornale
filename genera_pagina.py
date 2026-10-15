@@ -33,6 +33,9 @@ FEED = {
 }
 NOTIZIE_PER_TESTATA = 10
 
+# "Accadde oggi": solo eventi degli ultimi N anni
+ACCADDE_ULTIMI_ANNI = 115
+
 # Orari lezioni UniBo (2° anno, Economia dell'impresa, Rimini)
 ORARI_URL = "https://corsi.unibo.it/laurea/clei/orario-lezioni/@@orario_reale_json?anno=2&curricula=B69-000"
 # ---------------------------------------------------------------------------
@@ -174,6 +177,8 @@ def accadde_oggi(ora):
             except Exception as errore:
                 print(f"Accadde oggi ({lingua}/{tipo}) non disponibile: {errore}")
                 continue
+            eventi = [e for e in eventi
+                      if isinstance(e.get("year"), int) and e["year"] >= ora.year - ACCADDE_ULTIMI_ANNI]
             if not eventi:
                 continue
             eventi.sort(key=lambda e: len(e.get("pages", [])), reverse=True)
