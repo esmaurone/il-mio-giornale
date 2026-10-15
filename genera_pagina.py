@@ -8,7 +8,7 @@ import os
 import re
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
@@ -35,6 +35,25 @@ NOTIZIE_PER_TESTATA = 10
 
 # "Accadde oggi": solo eventi degli ultimi N anni
 ACCADDE_ULTIMI_ANNI = 115
+
+# Esami: ogni esame compare nella pagina da quando mancano ESAMI_PREAVVISO_GIORNI giorni
+# fino al giorno stesso. Per aggiungerne uno, copia una riga: (anno, mese, giorno, "nome")
+ESAMI_PREAVVISO_GIORNI = 40
+ESAMI = [
+    (2026, 11, 2, "1° parziale di Matematica finanziaria"),
+    (2026, 11, 4, "1° parziale di Rendicontazione"),
+    (2026, 12, 21, "2° parziale di Rendicontazione"),
+    (2027, 1, 7, "1° parziale di Diritto commerciale"),
+    (2027, 1, 8, "2° parziale di Matematica finanziaria"),
+    (2027, 1, 13, "1° appello di Strategie di impresa"),
+    (2027, 2, 4, "Appello di Matematica finanziaria"),
+    (2027, 3, 31, "1° parziale di Controllo di gestione"),
+    (2027, 4, 1, "1° parziale di Statistica"),
+    (2027, 4, 7, "2° parziale di Diritto commerciale"),
+    (2027, 5, 25, "2° parziale di Statistica"),
+    (2027, 5, 31, "1° appello di Macroeconomia"),
+    (2027, 6, 7, "2° parziale di Controllo di gestione"),
+]
 
 # Orari lezioni UniBo (2° anno, Economia dell'impresa, Rimini)
 ORARI_URL = "https://corsi.unibo.it/laurea/clei/orario-lezioni/@@orario_reale_json?anno=2&curricula=B69-000"
@@ -167,6 +186,23 @@ def lezioni(ora):
     return out
 
 
+def esami(ora):
+    oggi = ora.date()
+    righe = ""
+    for a, m, g, nome in sorted(ESAMI):
+        giorno = date(a, m, g)
+        mancano = (giorno - oggi).days
+        if not 0 <= mancano <= ESAMI_PREAVVISO_GIORNI:
+            continue
+        quando = "OGGI!" if mancano == 0 else "domani" if mancano == 1 else f"tra {mancano} giorni"
+        stile = ' class="urgente"' if mancano <= 7 else ""
+        righe += (f"<li{stile}><div><b>{html.escape(nome)}</b><br>"
+                  f"{GIORNI[giorno.weekday()]} {giorno:%d/%m/%Y} · {quando}</div></li>")
+    if not righe:
+        return f"<p>Nessun esame nei prossimi {ESAMI_PREAVVISO_GIORNI} giorni.</p>"
+    return f"<ul>{righe}</ul>"
+
+
 def accadde_oggi(ora):
     """Sceglie l'evento più 'importante' (stima: quello con più voci Wikipedia collegate)."""
     for lingua in ("it", "en"):
@@ -248,6 +284,7 @@ li img{width:104px;height:70px;object-fit:cover;border-radius:8px;flex:none}
 a{color:var(--ac);text-decoration:none}
 .fonte{display:inline-block;font-size:.95rem;font-weight:800;color:var(--ac);text-transform:uppercase;letter-spacing:.03em;margin-right:8px}
 li a{font-size:1.12rem;font-weight:600}
+li.urgente{border-left:5px solid #d33}
 .fascia{display:flex;gap:6px;overflow-x:auto;padding-bottom:6px}
 .ora{flex:none;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:54px;padding:6px 4px;border-radius:10px;background:#8881}
 .ora small{color:var(--sub);font-size:.72rem}.scorri{overflow-x:auto}
@@ -264,6 +301,8 @@ li a{font-size:1.12rem;font-weight:600}
 <a href="https://www.google.com/search?q=ilmeteo.it+meteo+Viserbella" target="_blank" rel="noopener">ilmeteo.it Viserbella</a></p>
 <h2>Lezioni</h2>
 __LEZIONI__
+<h2>Prossimi esami</h2>
+__ESAMI__
 <h2>Accadde oggi</h2>
 __ACCADDE__
 <h2>Notizie</h2>
@@ -276,7 +315,7 @@ def main():
     ora = datetime.now(ZoneInfo("Europe/Rome"))
     data = f"{GIORNI[ora.weekday()]} {ora:%d/%m/%Y %H:%M}"
     meteo = "".join(scheda_meteo(n, la, lo, ora) for n, (la, lo) in LUOGHI.items())
-    pagina = MODELLO.replace("__DATA__", data).replace("__METEO__", meteo).replace("__LEZIONI__", lezioni(ora)).replace("__ACCADDE__", accadde_oggi(ora)).replace("__NOTIZIE__", notizie())
+    pagina = MODELLO.replace("__DATA__", data).replace("__METEO__", meteo).replace("__LEZIONI__", lezioni(ora)).replace("__ESAMI__", esami(ora)).replace("__ACCADDE__", accadde_oggi(ora)).replace("__NOTIZIE__", notizie())
     os.makedirs("sito", exist_ok=True)
     with open("sito/index.html", "w", encoding="utf-8") as f:
         f.write(pagina)
