@@ -2,10 +2,10 @@ name: Aggiorna giornale
 
 on:
   schedule:
-    - cron: "0 7,11,20,23 * * *"   # orari UTC: 5 volte al giorno
-  workflow_dispatch:                   # avvio manuale
+    - cron: "17 */2 * * *"   # ogni 2 ore, al minuto 17 (orari in UTC)
+  workflow_dispatch:          # avvio manuale
   push:
-    branches: [main]                   # si aggiorna anche quando modifichi i file
+    branches: [main]          # si aggiorna anche quando modifichi i file
 
 permissions:
   contents: read
